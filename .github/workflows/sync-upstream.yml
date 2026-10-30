@@ -1,0 +1,61 @@
+name: Sync with upstream
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # daily at 02:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+
+env:
+  UPSTREAM_REPO: astral-sh/setup-uv
+  BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+
+      - name: Rebase onto upstream branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${BRANCH}"
+          git rebase "upstream/${BRANCH}"
+          # Keep the fork exactly one commit (this workflow) ahead of upstream
+          git push --force-with-lease origin "HEAD:${BRANCH}"
+
+      - name: Sync tags
+        run: |
+          # Diff tag refs; a tag is out of sync if the fork lacks it or it points
+          # elsewhere (e.g. floating v6 moved upstream)
+          git ls-remote --tags --refs upstream | sort > "$RUNNER_TEMP/upstream-tags"
+          git ls-remote --tags --refs origin | sort > "$RUNNER_TEMP/origin-tags"
+          mapfile -t refs < <(comm -23 "$RUNNER_TEMP/upstream-tags" "$RUNNER_TEMP/origin-tags" | cut -f2)
+
+          if [[ ${#refs[@]} -eq 0 ]]; then
+            echo "Tags already in sync"
+            exit 0
+          fi
+
+          specs=()
+          for ref in "${refs[@]}"; do
+            if cut -f2 "$RUNNER_TEMP/origin-tags" | grep -qxF "$ref"; then
+              echo "moved:   ${ref#refs/tags/}"
+            else
+              echo "missing: ${ref#refs/tags/}"
+            fi
+            specs+=("+$ref:$ref")
+          done
+
+          git fetch --no-tags upstream "${specs[@]}"
+          git push origin "${specs[@]}"
